@@ -1496,6 +1496,8 @@ class DBNN(GPUDBNN):
             config = DBNNConfig()
         elif isinstance(config, dict):
             config = DBNNConfig(**config)
+        # Store whether the dataset is an image dataset
+        self.is_image_data = is_image_data
 
         # First load the dataset configuration
         self.data_config = DatasetConfig.load_config(dataset_name) if dataset_name else None
