@@ -1849,6 +1849,27 @@ class DBNN(GPUDBNN):
         # Train the DBNN using adaptive_fit_predict
         results = self.adaptive_fit_predict(X_tensor, y_tensor)
         return results
+
+    def reconstruct_images_from_features(self, reconstructed_df):
+        """
+        Reconstruct images from deconvolved features.
+
+        Args:
+            reconstructed_df: DataFrame containing reconstructed features.
+
+        Returns:
+            List of PIL images.
+        """
+        # Convert DataFrame to tensor
+        features_tensor = torch.tensor(reconstructed_df.values, dtype=torch.float32).to(self.device)
+
+        # Use the inverse CNN to reconstruct images
+        reconstructed_images = []
+        for features in features_tensor:
+            image = self.feature_extractor.inverse_transform(features.unsqueeze(0))
+            reconstructed_images.append(image)
+
+        return reconstructed_images
 #-------------------------------------------------ImageDBNN-----Ends-----------------------------------------------
 
     def compute_global_statistics(self, X: pd.DataFrame):
@@ -4029,6 +4050,62 @@ class DBNN(GPUDBNN):
         # Concatenate predictions from all batches
         return torch.cat(predictions).cpu()
 
+    def predict_only(self, file_path):
+        """
+        Make predictions using a pre-trained model without retraining.
+        Supports both image files/folders and tabular data.
+
+        Args:
+            file_path: Path to the dataset file or folder.
+
+        Returns:
+            DataFrame containing predictions.
+        """
+        # Check if the input is an image file or folder
+        if os.path.isdir(file_path) or file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif', '.fits', '.dcm')):
+            print("\033[K" + "Processing image data for prediction...")
+
+            # Load and preprocess images
+            if os.path.isdir(file_path):
+                # Process all images in the folder
+                image_paths = [os.path.join(file_path, f) for f in os.listdir(file_path)
+                               if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif', '.fits', '.dcm'))]
+            else:
+                # Process a single image file
+                image_paths = [file_path]
+
+            # Extract features using the trained CNN
+            features = []
+            for img_path in image_paths:
+                img_features = self.feature_extractor(img_path)
+                features.append(img_features.cpu().numpy())
+
+            # Convert features to a tensor
+            X_tensor = torch.tensor(np.array(features), dtype=torch.float32).to(self.device)
+
+        else:
+            # Handle tabular data
+            print("\033[K" + "Processing tabular data for prediction...")
+            data = self._load_dataset(file_path)
+            X = data.drop(columns=[self.target_column])
+
+            # Preprocess data
+            X_processed = self._preprocess_data(X, is_training=False)
+            X_tensor = torch.tensor(X_processed, dtype=torch.float32).to(self.device)
+
+        # Make predictions
+        predictions = self.predict(X_tensor)
+
+        # Convert predictions to original labels
+        pred_labels = self.label_encoder.inverse_transform(predictions.cpu().numpy())
+
+        # Create results DataFrame
+        results = pd.DataFrame({
+            'file_path': image_paths if os.path.isdir(file_path) or file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif', '.fits', '.dcm')) else data.index,
+            'predicted_class': pred_labels
+        })
+
+        return results
 
     def _save_best_weights(self):
         """Save the best weights to file"""
@@ -5917,8 +5994,8 @@ def print_dataset_info(conf_path: str, csv_path: str):
 def main():
     parser = argparse.ArgumentParser(description='Process ML datasets (tabular or image data)')
     parser.add_argument("--file_path", nargs='?', help="Path to dataset file or folder")
-    parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN'],
-                        required=False, help="Mode to run the network: train, train_predict, or invertDBNN.")
+    parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN', 'predict_only'],
+                        required=False, help="Mode to run the network: train, train_predict, invertDBNN, or predict_only.")
     parser.add_argument('--is_image_data', action='store_true',
                         help="Set this flag if the dataset is image-based.")
     args = parser.parse_args()
@@ -5943,6 +6020,19 @@ def main():
         # Initialize DBNN with image data flag
         model = DBNN(dataset_name=basename, is_image_data=True)
 
+        if args.mode == "predict_only":
+            # Load pre-trained model and make predictions
+            model._load_model_components()
+            results = model.predict_only(args.file_path)
+
+            # Save predictions
+            save_path = f"data/{basename}/Predictions/"
+            os.makedirs(save_path, exist_ok=True)
+            results.to_csv(f"{save_path}/predictions.csv", index=False)
+
+            print("\033[K" + f"Predictions saved to {save_path}")
+            return
+
         # Train the CNN feature extractor
         model.train_cnn(basename, batch_size=32, epochs=10, lr=0.001)
 
@@ -5960,7 +6050,7 @@ def main():
         return
 
     # Handle tabular data
-    elif args.mode != "invertDBNN":
+    elif args.mode != "invertDBNN" and args.mode != "predict_only":
         processor.process_dataset(args.file_path)
         dataset_pairs = find_dataset_pairs()
 
@@ -5987,6 +6077,25 @@ def main():
         print("\033[K" + f"Processed {results['n_samples']} samples with {results['n_features']} features")
         print("\033[K" + f"Excluded {results['n_excluded']} features")
         save_label_encoder(model.label_encoder, basename)
+
+    # Handle predict_only mode
+    elif args.mode == "predict_only":
+        processor.process_dataset(args.file_path)
+
+        # Create DBNN instance with specific dataset name
+        model = DBNN(dataset_name=basename)
+
+        # Load pre-trained model and make predictions
+        model._load_model_components()
+        results = model.predict_only(args.file_path)
+
+        # Save predictions
+        save_path = f"data/{basename}/Predictions/"
+        os.makedirs(save_path, exist_ok=True)
+        results.to_csv(f"{save_path}/predictions.csv", index=False)
+
+        print("\033[K" + f"Predictions saved to {save_path}")
+        return
 
     # Handle invertDBNN mode
     elif args.mode == "invertDBNN":
@@ -6036,6 +6145,19 @@ def main():
             reconstructed_df.to_csv(output_file, index=False)
 
             print("\033[K" + f"Reconstructed features saved to {output_file}")
+
+            # If image data, reconstruct images from features
+            if args.is_image_data:
+                print("\033[K" + "Reconstructing images from features...")
+                reconstructed_images = model.reconstruct_images_from_features(reconstructed_df)
+                image_dir = os.path.join(output_dir, 'reconstructed_images')
+                os.makedirs(image_dir, exist_ok=True)
+
+                for idx, image in enumerate(reconstructed_images):
+                    image_path = os.path.join(image_dir, f'reconstructed_{idx}.png')
+                    image.save(image_path)
+
+                print("\033[K" + f"Reconstructed images saved to {image_dir}")
 
         except FileNotFoundError as e:
             print("\033[K" + f"Error: {str(e)}")
