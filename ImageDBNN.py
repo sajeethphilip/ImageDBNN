@@ -1731,15 +1731,15 @@ class DBNN(GPUDBNN):
 
 
     def train_cnn(self, dataset_name: str, batch_size: int = 32, epochs: int = 10, lr: float = 0.001):
-        """
-        Train the CNN on the entire dataset and save extracted features to a CSV file.
+            """
+            Train the CNN on the entire dataset and save extracted features to a CSV file.
 
-        Args:
-            dataset_name: Name of the dataset (local folder, URL, compressed file, or PyTorch dataset).
-            batch_size: Batch size for training.
-            epochs: Number of training epochs.
-            lr: Learning rate for the optimizer.
-        """
+            Args:
+                dataset_name: Name of the dataset (local folder, URL, compressed file, or PyTorch dataset).
+                batch_size: Batch size for training.
+                epochs: Number of training epochs.
+                lr: Learning rate for the optimizer.
+            """
         # Load the dataset
         self._load_cnn_config(dataset_name)  # This will generate the CSV file if it doesn't exist
         dataset_dir = os.path.join('data', dataset_name)
@@ -1784,9 +1784,10 @@ class DBNN(GPUDBNN):
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(cnn_model.parameters(), lr=lr)
 
-        # Train the CNN
+        # Train the CNN with tqdm progress bar
         cnn_model.train()
         for epoch in range(epochs):
+            epoch_pbar = tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{epochs}")
             for batch_idx, (images, labels) in enumerate(dataloader):
                 images, labels = images.to(self.device), labels.to(self.device)
 
@@ -1799,8 +1800,10 @@ class DBNN(GPUDBNN):
                 loss.backward()
                 optimizer.step()
 
-                if batch_idx % 10 == 0:
-                    print(f"Epoch [{epoch+1}/{epochs}], Batch [{batch_idx}/{len(dataloader)}], Loss: {loss.item():.4f}")
+                epoch_pbar.update(1)
+                epoch_pbar.set_postfix({'loss': loss.item()})
+
+            epoch_pbar.close()
 
         # Save the trained CNN model
         model_path = os.path.join(dataset_dir, f'{dataset_name}_cnn.pth')
@@ -1812,23 +1815,37 @@ class DBNN(GPUDBNN):
 
     def _extract_features(self, cnn_model, dataset, dataset_dir):
         """
-        Extract features from the dataset using the trained CNN.
+        Extract features from the dataset using the trained CNN and save to a properly formatted CSV file.
         """
         cnn_model.eval()
         features = []
         labels = []
+        image_paths = []
+        image_classes = []
 
+        # Initialize tqdm progress bar for feature extraction
         with torch.no_grad():
-            for images, label in dataset:
+            for images, label in tqdm(dataset, desc="Extracting features"):
                 images = images.unsqueeze(0).to(self.device)
                 feature = cnn_model(images).squeeze().cpu().numpy()
                 features.append(feature)
                 labels.append(label)
 
+                # Extract image path and class (assuming dataset is a custom ImageDataset)
+                if hasattr(dataset, 'data'):
+                    img_path = dataset.data.iloc[dataset.data.index.get_loc(label)]['image_path']
+                    image_paths.append(img_path)
+                    image_classes.append(os.path.basename(os.path.dirname(img_path)))
+
+        # Create DataFrame with feature columns, target, image path, and image class
+        feature_cols = [f'Feature{i}' for i in range(len(features[0]))]
+        feature_df = pd.DataFrame(features, columns=feature_cols)
+        feature_df['target'] = labels
+        feature_df['image_path'] = image_paths
+        feature_df['image_class'] = image_classes
+
         # Save features to a CSV file
-        feature_df = pd.DataFrame(features)
-        feature_df['label'] = labels
-        feature_csv_path = os.path.join(dataset_dir, f'{dataset_name}_features.csv')
+        feature_csv_path = os.path.join(dataset_dir, f'{self.dataset_name}_features.csv')
         feature_df.to_csv(feature_csv_path, index=False)
         print(f"Extracted features saved to {feature_csv_path}")
 
