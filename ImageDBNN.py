@@ -2199,24 +2199,31 @@ class DBNN(GPUDBNN):
         return features
 
     def _load_dataset(self) -> pd.DataFrame:
-        """Load and preprocess dataset with improved error handling"""
-        DEBUG.log(f" Loading dataset from config: {self.config}")
+        """Load and preprocess dataset with improved error handling and torchvision support."""
+        DEBUG.log(f"Loading dataset from config: {self.config}")
         try:
             # Validate configuration
             if self.config is None:
                 raise ValueError(f"No configuration found for dataset: {self.dataset_name}")
+
             file_path = self.config.get('file_path')
             if file_path is None:
                 raise ValueError(f"No file path specified in configuration for dataset: {self.dataset_name}")
+
+            # Handle torchvision datasets if is_image_data is True
+            if self.is_image_data and self.dataset_name.lower() in ['mnist', 'cifar10', 'cifar100']:
+                DEBUG.log(f"Loading {self.dataset_name} from torchvision datasets")
+                return self._load_torchvision_dataset(self.dataset_name.lower())
+
             # Handle URL or local file
             try:
                 if file_path.startswith(('http://', 'https://')):
-                    DEBUG.log(f" Loading from URL: {file_path}")
+                    DEBUG.log(f"Loading from URL: {file_path}")
                     response = requests.get(file_path)
                     response.raise_for_status()
                     data = StringIO(response.text)
                 else:
-                    DEBUG.log(f" Loading from local file: {file_path}")
+                    DEBUG.log(f"Loading from local file: {file_path}")
                     if not os.path.exists(file_path):
                         raise FileNotFoundError(f"Dataset file not found: {file_path}")
                     data = file_path
@@ -2231,21 +2238,21 @@ class DBNN(GPUDBNN):
 
                 # DO NOT include 'names' parameter for the initial read
                 # This allows us to read the actual headers from the file
-                DEBUG.log(f" Reading CSV with parameters: {read_params}")
+                DEBUG.log(f"Reading CSV with parameters: {read_params}")
                 df = pd.read_csv(data, **read_params)
-                self.Original_data=df.copy()
+                self.Original_data = df.copy()
 
                 if df is None or df.empty:
                     raise ValueError(f"Empty dataset loaded from {file_path}")
 
-                DEBUG.log(f" Loaded DataFrame shape: {df.shape}")
-                DEBUG.log(f" Original DataFrame columns: {df.columns.tolist()}")
+                DEBUG.log(f"Loaded DataFrame shape: {df.shape}")
+                DEBUG.log(f"Original DataFrame columns: {df.columns.tolist()}")
 
                 # Filter features based on config after reading the actual data
                 if 'column_names' in self.config:
-                    DEBUG.log(" Filtering features based on config")
+                    DEBUG.log("Filtering features based on config")
                     df = _filter_features_from_config(df, self.config)
-                    DEBUG.log(f" Shape after filtering: {df.shape}")
+                    DEBUG.log(f"Shape after filtering: {df.shape}")
 
                 # Handle target column
                 target_column = self.config.get('target_column')
@@ -2259,14 +2266,14 @@ class DBNN(GPUDBNN):
                         raise ValueError(f"Target column index {target_column} is out of range")
                     target_column = cols[target_column]
                     self.config['target_column'] = target_column
-                    DEBUG.log(f" Using target column: {target_column}")
+                    DEBUG.log(f"Using target column: {target_column}")
 
                 if target_column not in df.columns:
                     raise ValueError(f"Target column '{target_column}' not found in dataset")
 
-                DEBUG.log(f" Dataset loaded successfully. Shape: {df.shape}")
-                DEBUG.log(f" Columns: {df.columns.tolist()}")
-                DEBUG.log(f" Data types:\n{df.dtypes}")
+                DEBUG.log(f"Dataset loaded successfully. Shape: {df.shape}")
+                DEBUG.log(f"Columns: {df.columns.tolist()}")
+                DEBUG.log(f"Data types:\n{df.dtypes}")
 
                 # Create data directory path
                 dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
@@ -2276,7 +2283,7 @@ class DBNN(GPUDBNN):
 
                 # Check if this is a fresh start with random shuffling
                 if self.fresh_start and self.random_state == -1:
-                    print("\033[K" +"Fresh start with random shuffling enabled")
+                    print("\033[K" + "Fresh start with random shuffling enabled")
                     # Perform 3 rounds of truly random shuffling
                     for _ in range(3):
                         df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
@@ -2284,28 +2291,96 @@ class DBNN(GPUDBNN):
                     os.makedirs(data_dir, exist_ok=True)
                     # Save shuffled data
                     df.to_csv(shuffled_file, index=False)
-                    print("\033[K" +f"Saved shuffled data to {shuffled_file}")
+                    print("\033[K" + f"Saved shuffled data to {shuffled_file}")
                 elif os.path.exists(shuffled_file):
-                    print("\033[K" +f"Loading previously shuffled data from {shuffled_file}")
+                    print("\033[K" + f"Loading previously shuffled data from {shuffled_file}")
                     df = pd.read_csv(shuffled_file)
                 else:
-                    print("\033[K" +"Using original data order (no shuffling required)")
+                    print("\033[K" + "Using original data order (no shuffling required)")
 
                 return df
 
             except requests.exceptions.RequestException as e:
-                DEBUG.log(f" Error downloading dataset from URL: {str(e)}")
+                DEBUG.log(f"Error downloading dataset from URL: {str(e)}")
                 raise RuntimeError(f"Failed to download dataset from URL: {str(e)}")
             except pd.errors.EmptyDataError:
-                DEBUG.log(f" Error: Dataset file is empty")
+                DEBUG.log(f"Error: Dataset file is empty")
                 raise ValueError(f"Dataset file is empty: {file_path}")
             except pd.errors.ParserError as e:
-                DEBUG.log(f" Error parsing CSV file: {str(e)}")
+                DEBUG.log(f"Error parsing CSV file: {str(e)}")
                 raise ValueError(f"Invalid CSV format: {str(e)}")
         except Exception as e:
-            DEBUG.log(f" Error loading dataset: {str(e)}")
-            DEBUG.log(" Stack trace:", traceback.format_exc())
+            DEBUG.log(f"Error loading dataset: {str(e)}")
+            DEBUG.log("Stack trace:", traceback.format_exc())
             raise RuntimeError(f"Failed to load dataset: {str(e)}")
+
+
+    def _load_torchvision_dataset(self, dataset_name: str) -> pd.DataFrame:
+        """Load a standard torchvision dataset (e.g., MNIST, CIFAR10)."""
+        import torchvision.datasets as datasets
+        from torchvision.transforms import ToTensor
+
+        # Map dataset names to torchvision dataset classes
+        dataset_map = {
+            'mnist': datasets.MNIST,
+            'cifar10': datasets.CIFAR10,
+            'cifar100': datasets.CIFAR100,
+        }
+
+        if dataset_name not in dataset_map:
+            raise ValueError(f"Unsupported torchvision dataset: {dataset_name}")
+
+        # Download and load the dataset
+        dataset_dir = os.path.join('data', dataset_name)
+        os.makedirs(dataset_dir, exist_ok=True)
+
+        dataset = dataset_map[dataset_name](
+            root=dataset_dir,
+            download=True,
+            transform=ToTensor()
+        )
+
+        # Convert the dataset to a DataFrame
+        data = []
+        for img, label in dataset:
+            img_array = img.numpy().flatten()  # Flatten the image to a 1D array
+            data.append({'image': img_array, 'label': label})
+
+        df = pd.DataFrame(data)
+        df['label'] = df['label'].astype(int)  # Ensure labels are integers
+
+        # Update configuration
+        self.config['target_column'] = 'label'
+        self.config['file_path'] = os.path.join(dataset_dir, f'{dataset_name}.csv')
+
+        # Save the dataset to CSV for future use
+        df.to_csv(self.config['file_path'], index=False)
+        DEBUG.log(f"Saved {dataset_name} dataset to {self.config['file_path']}")
+
+        # Create data directory path for shuffled data
+        dataset_folder = os.path.splitext(os.path.basename(self.dataset_name))[0]
+        base_path = self.config.get('training_params', {}).get('training_save_path', 'training_data')
+        data_dir = os.path.join(base_path, dataset_folder, 'data')
+        shuffled_file = os.path.join(data_dir, 'shuffled_data.csv')
+
+        # Check if this is a fresh start with random shuffling
+        if self.fresh_start and self.random_state == -1:
+            print("\033[K" + "Fresh start with random shuffling enabled")
+            # Perform 3 rounds of truly random shuffling
+            for _ in range(3):
+                df = df.iloc[np.random.permutation(len(df))].reset_index(drop=True)
+            # Ensure directory exists before saving
+            os.makedirs(data_dir, exist_ok=True)
+            # Save shuffled data
+            df.to_csv(shuffled_file, index=False)
+            print("\033[K" + f"Saved shuffled data to {shuffled_file}")
+        elif os.path.exists(shuffled_file):
+            print("\033[K" + f"Loading previously shuffled data from {shuffled_file}")
+            df = pd.read_csv(shuffled_file)
+        else:
+            print("\033[K" + "Using original data order (no shuffling required)")
+
+        return df
 
     def _compute_batch_posterior(self, features: torch.Tensor, epsilon: float = 1e-10):
         """Optimized batch posterior with vectorized operations"""
