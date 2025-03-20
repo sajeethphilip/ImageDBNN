@@ -5915,26 +5915,56 @@ def print_dataset_info(conf_path: str, csv_path: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Process ML datasets')
+    parser = argparse.ArgumentParser(description='Process ML datasets (tabular or image data)')
     parser.add_argument("--file_path", nargs='?', help="Path to dataset file or folder")
     parser.add_argument('--mode', type=str, choices=['train', 'train_predict', 'invertDBNN'],
                         required=False, help="Mode to run the network: train, train_predict, or invertDBNN.")
+    parser.add_argument('--is_image_data', action='store_true',
+                        help="Set this flag if the dataset is image-based.")
     args = parser.parse_args()
+
     processor = DatasetProcessor()
-    parser.print_help()
+
     if not args.file_path:
         parser.print_help()
         input("\nPress any key to search data folder for datasets (or Ctrl-C to exit)...")
         process_datasets()
+        return
 
-    elif args.mode !="invertDBNN":
+    # Extract dataset basename
+    basename = args.file_path.split('/')[-1].split('.')[0]
+    conf_path = os.path.join(f"data/{basename}/{basename}.conf")
+    csv_path = os.path.join(f"data/{basename}/{basename}.csv")
+
+    # Handle image data
+    if args.is_image_data:
+        print("\033[K" + f"Processing image dataset: {args.file_path}")
+
+        # Initialize DBNN with image data flag
+        model = DBNN(dataset_name=basename, is_image_data=True)
+
+        # Train the CNN feature extractor
+        model.train_cnn(basename, batch_size=32, epochs=10, lr=0.001)
+
+        # Train the DBNN on extracted features
+        results = model.train_dbnn_on_features(basename)
+
+        # Save results
+        save_path = f"data/{basename}/Predictions/"
+        os.makedirs(save_path, exist_ok=True)
+        results['all_predictions'].to_csv(f"{save_path}/all_predictions.csv", index=False)
+        results['train_predictions'].to_csv(f"{save_path}/train_predictions.csv", index=False)
+        results['test_predictions'].to_csv(f"{save_path}/test_predictions.csv", index=False)
+
+        print("\033[K" + f"Results saved to {save_path}")
+        return
+
+    # Handle tabular data
+    elif args.mode != "invertDBNN":
         processor.process_dataset(args.file_path)
         dataset_pairs = find_dataset_pairs()
-        basename=args.file_path.split('/')[-1].split('.')[0]
-        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
-        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
-        # Save the label encoder after training
-       # Create DBNN instance with specific dataset name
+
+        # Create DBNN instance with specific dataset name
         model = DBNN(dataset_name=basename)
 
         # Optionally create an invertible model
@@ -5943,48 +5973,45 @@ def main():
                 reconstruction_weight=model.config.get('reconstruction_weight', 0.5),
                 feedback_strength=model.config.get('feedback_strength', 0.3)
             )
-            print("\033[K" +"Created invertible DBNN model")
+            print("\033[K" + "Created invertible DBNN model")
 
         start_time = datetime.now()
         results = model.process_dataset(conf_path)
         end_time = datetime.now()
 
         # Print results
-        print("\033[K" +"Processing complete!")
-        print("\033[K" +f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
-        print("\033[K" +f"Results saved to: {results['results_path']}")
-        print("\033[K" +f"Training log saved to: {results['log_path']}")
-        print("\033[K" +f"Processed {results['n_samples']} samples with {results['n_features']} features")
-        print("\033[K" +f"Excluded {results['n_excluded']} features")
+        print("\033[K" + "Processing complete!")
+        print("\033[K" + f"Time taken: {(end_time - start_time).total_seconds():.1f} seconds")
+        print("\033[K" + f"Results saved to: {results['results_path']}")
+        print("\033[K" + f"Training log saved to: {results['log_path']}")
+        print("\033[K" + f"Processed {results['n_samples']} samples with {results['n_features']} features")
+        print("\033[K" + f"Excluded {results['n_excluded']} features")
         save_label_encoder(model.label_encoder, basename)
 
-    elif args.mode =="invertDBNN":
+    # Handle invertDBNN mode
+    elif args.mode == "invertDBNN":
         processor.process_dataset(args.file_path)
         dataset_pairs = find_dataset_pairs()
-        basename=args.file_path.split('/')[-1].split('.')[0]
-        conf_path=os.path.join(f"data/{basename}/{basename}.conf")
-        csv_path=os.path.join(f"data/{basename}/{basename}.csv")
+
         # Invert DBNN mode
         model = DBNN(dataset_name=basename)
         model._load_model_components()
+
         # Load configuration
         with open(conf_path, 'r') as f:
             config_dict = json.load(f)
 
-        print("\033[K" +"DEBUG: Inverse DBNN Settings:")
+        print("\033[K" + "DEBUG: Inverse DBNN Settings:")
         for param in ['reconstruction_weight', 'feedback_strength', 'inverse_learning_rate']:
             value = config_dict.get('training_params', {}).get(param, 0.1)
-            print("\033[K" +f"- {param}: {value}")
+            print("\033[K" + f"- {param}: {value}")
 
-        print("\033[K" +"DEBUG: Initializing inverse model...")
+        print("\033[K" + "DEBUG: Initializing inverse model...")
 
         # Load the label encoder
         try:
             label_encoder = load_label_encoder(basename)
             model.label_encoder = label_encoder
-
-            # Now you can safely access model.label_encoder.classes_
-            #print("\033[K" +f"Classes in label encoder: {model.label_encoder.classes_}")
 
             # Proceed with inverse model initialization
             inverse_model = InvertibleDBNN(
@@ -6008,15 +6035,15 @@ def main():
             reconstructed_df = pd.DataFrame(reconstruction_features.cpu().numpy(), columns=feature_columns)
             reconstructed_df.to_csv(output_file, index=False)
 
-            print("\033[K" +f"Reconstructed features saved to {output_file}")
+            print("\033[K" + f"Reconstructed features saved to {output_file}")
 
         except FileNotFoundError as e:
-            print("\033[K" +f"Error: {str(e)}")
-            print("\033[K" +"Please ensure the model has been trained before using invertDBNN mode.")
+            print("\033[K" + f"Error: {str(e)}")
+            print("\033[K" + "Please ensure the model has been trained before using invertDBNN mode.")
             return
 
     else:
-        print("\033[K" +"No datasets found in data folder")
+        print("\033[K" + "No datasets found in data folder")
 if __name__ == "__main__":
     print("\033[K" +"DBNN Dataset Processor")
     print("\033[K" +"=" * 40)
