@@ -313,11 +313,11 @@ class DatasetConfig:
             "min_divergence": 0.1
         }
         config["execution_flags"]= {
-            "train": true,
-            "train_only": false,
-            "predict": true,
-            "fresh_start": false,
-            "use_previous_model": true
+            "train": True,
+            "train_only": False,
+            "predict": True,
+            "fresh_start": False,
+            "use_previous_model": True
         }
         # Save the configuration
         config_path = f"data/{dataset_name}/{dataset_name}.conf"
