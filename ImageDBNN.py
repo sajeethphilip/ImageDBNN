@@ -271,6 +271,9 @@ class DatasetConfig:
         """Create a default configuration file with enhanced defaults"""
         config = DatasetConfig.DEFAULT_CONFIG.copy()
         config['file_path'] = f"{dataset_name}.csv"
+        # Ensure the directory exists before saving the config file
+        config_dir = os.path.dirname(f"data/{dataset_name}/{dataset_name}.conf")
+        os.makedirs(config_dir, exist_ok=True)
 
         # Try to infer column names from CSV if it exists
         if os.path.exists(config['file_path']):
@@ -2396,7 +2399,7 @@ class DBNN(GPUDBNN):
         df['label'] = df['label'].astype(int)  # Ensure labels are integers
 
         # Update configuration
-        self.config['target_column'] = 'label'
+        self.config['target_column'] = 'label'  # Set the target column to 'label'
         self.config['file_path'] = os.path.join(dataset_dir, f'{dataset_name}.csv')
 
         # Save the dataset to CSV for future use
