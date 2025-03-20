@@ -1428,7 +1428,7 @@ class FeatureExtractor(nn.Module):
             x = x.to(self.device)
             return self.tabular_fc(x)
 
- class FlexibleCNN(nn.Module):
+class FlexibleCNN(nn.Module):
     def __init__(self, input_channels=1, output_size=128, min_image_size=256):
         super(FlexibleCNN, self).__init__()
         self.min_image_size = min_image_size
