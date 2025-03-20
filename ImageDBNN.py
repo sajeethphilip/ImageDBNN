@@ -46,7 +46,11 @@ import pandas as pd
 from torchvision import datasets
 from torchvision.datasets.utils import download_and_extract_archive
 from sklearn.preprocessing import LabelEncoder
-
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
+from PIL import Image
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
 Train_device = 'cuda' if torch.cuda.is_available() else 'cpu'  # Default device
@@ -1723,6 +1727,128 @@ class DBNN(GPUDBNN):
         with open(conf_path, 'w') as f:
             json.dump(conf_content, f, indent=4)
 
+
+    def train_cnn(self, dataset_name: str, batch_size: int = 32, epochs: int = 10, lr: float = 0.001):
+        """
+        Train the CNN on the entire dataset and save extracted features to a CSV file.
+
+        Args:
+            dataset_name: Name of the dataset (local folder, URL, compressed file, or PyTorch dataset).
+            batch_size: Batch size for training.
+            epochs: Number of training epochs.
+            lr: Learning rate for the optimizer.
+        """
+        # Load the dataset
+        self._load_cnn_config(dataset_name)  # This will generate the CSV file if it doesn't exist
+        dataset_dir = os.path.join('data', dataset_name)
+        csv_path = os.path.join(dataset_dir, f'{dataset_name}.csv')
+
+        # Create a custom dataset from the CSV file
+        class ImageDataset(Dataset):
+            def __init__(self, csv_path, transform=None):
+                self.data = pd.read_csv(csv_path)
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.data)
+
+            def __getitem__(self, idx):
+                img_path = self.data.iloc[idx]['image_path']
+                label = self.data.iloc[idx]['label']
+                img = Image.open(img_path).convert('RGB')
+                if self.transform:
+                    img = self.transform(img)
+                return img, label
+
+        # Define transformations
+        transform = transforms.Compose([
+            transforms.Resize((self.cnn_config['min_image_size'], self.cnn_config['min_image_size'])),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        # Create the dataset and dataloader
+        dataset = ImageDataset(csv_path, transform=transform)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        # Define the CNN model
+        cnn_model = FlexibleCNN(
+            input_channels=self.cnn_config['input_channels'],
+            output_size=self.cnn_config['output_size'],
+            min_image_size=self.cnn_config['min_image_size']
+        ).to(self.device)
+
+        # Define loss function and optimizer
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(cnn_model.parameters(), lr=lr)
+
+        # Train the CNN
+        cnn_model.train()
+        for epoch in range(epochs):
+            for batch_idx, (images, labels) in enumerate(dataloader):
+                images, labels = images.to(self.device), labels.to(self.device)
+
+                # Forward pass
+                outputs = cnn_model(images)
+                loss = criterion(outputs, labels)
+
+                # Backward pass and optimization
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                if batch_idx % 10 == 0:
+                    print(f"Epoch [{epoch+1}/{epochs}], Batch [{batch_idx}/{len(dataloader)}], Loss: {loss.item():.4f}")
+
+        # Save the trained CNN model
+        model_path = os.path.join(dataset_dir, f'{dataset_name}_cnn.pth')
+        torch.save(cnn_model.state_dict(), model_path)
+        print(f"CNN model saved to {model_path}")
+
+        # Extract features using the trained CNN
+        self._extract_features(cnn_model, dataset, dataset_dir)
+
+    def _extract_features(self, cnn_model, dataset, dataset_dir):
+        """
+        Extract features from the dataset using the trained CNN.
+        """
+        cnn_model.eval()
+        features = []
+        labels = []
+
+        with torch.no_grad():
+            for images, label in dataset:
+                images = images.unsqueeze(0).to(self.device)
+                feature = cnn_model(images).squeeze().cpu().numpy()
+                features.append(feature)
+                labels.append(label)
+
+        # Save features to a CSV file
+        feature_df = pd.DataFrame(features)
+        feature_df['label'] = labels
+        feature_csv_path = os.path.join(dataset_dir, f'{dataset_name}_features.csv')
+        feature_df.to_csv(feature_csv_path, index=False)
+        print(f"Extracted features saved to {feature_csv_path}")
+
+    def train_dbnn_on_features(self, dataset_name: str):
+        """
+        Train the DBNN on the extracted features.
+        """
+        dataset_dir = os.path.join('data', dataset_name)
+        feature_csv_path = os.path.join(dataset_dir, f'{dataset_name}_features.csv')
+
+        # Load the feature CSV file
+        feature_df = pd.read_csv(feature_csv_path)
+        X = feature_df.drop(columns=['label']).values
+        y = feature_df['label'].values
+
+        # Convert to tensors
+        X_tensor = torch.tensor(X, dtype=torch.float32).to(self.device)
+        y_tensor = torch.tensor(y, dtype=torch.long).to(self.device)
+
+        # Train the DBNN using adaptive_fit_predict
+        results = self.adaptive_fit_predict(X_tensor, y_tensor)
+        return results
 #-------------------------------------------------ImageDBNN-----Ends-----------------------------------------------
 
     def compute_global_statistics(self, X: pd.DataFrame):
