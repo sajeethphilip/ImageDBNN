@@ -6154,6 +6154,7 @@ def main():
             print("\033[K" + f"Predictions saved to {save_path}")
             return
 
+        print(f"{Colors.GREEN} Training will start on CNN now...{Colors.ENDC}")
         # Train the CNN feature extractor
         model.train_cnn(basename, batch_size=32, epochs=10, lr=0.001)
 
