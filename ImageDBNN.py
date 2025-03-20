@@ -1760,7 +1760,7 @@ class DBNN(GPUDBNN):
                     img = Image.open(img_path).convert('RGB')
                     if self.transform:
                         img = self.transform(img)
-                    return img, label
+                    return img, label, img_path  # Return image, label, and image path
 
             # Define transformations
             transform = transforms.Compose([
@@ -1825,17 +1825,13 @@ class DBNN(GPUDBNN):
 
         # Initialize tqdm progress bar for feature extraction
         with torch.no_grad():
-            for images, label in tqdm(dataset, desc="Extracting features"):
+            for images, label, img_path in tqdm(dataset, desc="Extracting features"):
                 images = images.unsqueeze(0).to(self.device)
                 feature = cnn_model(images).squeeze().cpu().numpy()
                 features.append(feature)
-                labels.append(label)
-
-                # Extract image path and class (assuming dataset is a custom ImageDataset)
-                if hasattr(dataset, 'data'):
-                    img_path = dataset.data.iloc[dataset.data.index.get_loc(label)]['image_path']
-                    image_paths.append(img_path)
-                    image_classes.append(os.path.basename(os.path.dirname(img_path)))
+                labels.append(label)  # Ensure label is a scalar value
+                image_paths.append(img_path)
+                image_classes.append(os.path.basename(os.path.dirname(img_path)))
 
         # Create DataFrame with feature columns, target, image path, and image class
         feature_cols = [f'Feature{i}' for i in range(len(features[0]))]
