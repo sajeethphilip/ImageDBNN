@@ -37,7 +37,15 @@ from PIL import Image
 import torchvision.transforms as transforms
 from astropy.io import fits
 import pydicom
-
+import os
+import json
+import requests
+import zipfile
+import tarfile
+import pandas as pd
+from torchvision import datasets
+from torchvision.datasets.utils import download_and_extract_archive
+from sklearn.preprocessing import LabelEncoder
 
 #------------------------------------------------------------------------Declarations---------------------
 # Device configuration - set this first since other classes need it
@@ -1546,6 +1554,176 @@ class DBNN(GPUDBNN):
 
         # Update feature dimensions for DBNN
         self.feature_dims = self.cnn_config['output_size']
+
+#--------------------------------------------------------ImageDBNN-----------------------------------
+    def _load_cnn_config(self, dataset_name: str) -> Dict:
+        """
+        Load or create CNN configuration based on the dataset type.
+
+        Args:
+            dataset_name: Name of the dataset, which could be:
+                - Path to a local image folder.
+                - URL to a dataset.
+                - Path to a compressed file (zip, gzip, tar, tgz).
+                - Name of a PyTorch dataset (e.g., 'mnist', 'cifar100').
+
+        Returns:
+            Dictionary containing CNN configuration parameters.
+        """
+        # Create the dataset directory if it doesn't exist
+        dataset_dir = os.path.join('data', dataset_name)
+        os.makedirs(dataset_dir, exist_ok=True)
+
+        # Paths for configuration files
+        config_path = os.path.join(dataset_dir, f'{dataset_name}.json')
+        conf_path = os.path.join(dataset_dir, f'{dataset_name}.conf')
+        csv_path = os.path.join(dataset_dir, f'{dataset_name}.csv')
+
+        # If the configuration file already exists, load it
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                return json.load(f)
+
+        # Initialize CNN configuration
+        cnn_config = {
+            'input_channels': 3,  # Default for RGB images
+            'output_size': 128,   # Default output feature size
+            'min_image_size': 256,  # Default minimum image size
+            'dataset_type': None,  # Will be set based on the dataset
+            'num_classes': None,   # Will be set based on the dataset
+            'class_labels': None,  # Will be set based on the dataset
+            'data_path': None      # Will be set based on the dataset
+        }
+
+        # Handle different types of datasets
+        if os.path.isdir(dataset_name):  # Local image folder
+            cnn_config['dataset_type'] = 'local_folder'
+            cnn_config['data_path'] = dataset_name
+            self._process_local_folder(dataset_name, csv_path, cnn_config)
+
+        elif dataset_name.startswith(('http://', 'https://')):  # URL
+            cnn_config['dataset_type'] = 'url'
+            self._download_and_process_url(dataset_name, dataset_dir, csv_path, cnn_config)
+
+        elif os.path.isfile(dataset_name) and any(dataset_name.endswith(ext) for ext in ['.zip', '.gz', '.tar', '.tgz']):  # Compressed file
+            cnn_config['dataset_type'] = 'compressed_file'
+            self._extract_and_process_compressed_file(dataset_name, dataset_dir, csv_path, cnn_config)
+
+        else:  # PyTorch dataset (e.g., 'mnist', 'cifar100')
+            cnn_config['dataset_type'] = 'pytorch_dataset'
+            self._load_pytorch_dataset(dataset_name, dataset_dir, csv_path, cnn_config)
+
+        # Save the CNN configuration
+        with open(config_path, 'w') as f:
+            json.dump(cnn_config, f, indent=4)
+
+        # Create the DBNN configuration file
+        self._create_dbnn_conf_file(conf_path, cnn_config)
+
+        return cnn_config
+
+    def _process_local_folder(self, folder_path: str, csv_path: str, cnn_config: Dict):
+        """
+        Process a local folder containing images organized by class.
+        """
+        class_folders = [f for f in os.listdir(folder_path) if os.path.isdir(os.path.join(folder_path, f))]
+        cnn_config['num_classes'] = len(class_folders)
+        cnn_config['class_labels'] = class_folders
+
+        # Create a CSV file with image paths and labels
+        data = []
+        for label in class_folders:
+            label_folder = os.path.join(folder_path, label)
+            for img_file in os.listdir(label_folder):
+                img_path = os.path.join(label_folder, img_file)
+                data.append({'image_path': img_path, 'label': label})
+
+        df = pd.DataFrame(data)
+        df.to_csv(csv_path, index=False)
+
+    def _download_and_process_url(self, url: str, dataset_dir: str, csv_path: str, cnn_config: Dict):
+        """
+        Download and process a dataset from a URL.
+        """
+        # Download the dataset
+        filename = os.path.basename(url)
+        download_path = os.path.join(dataset_dir, filename)
+        response = requests.get(url, stream=True)
+        with open(download_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        # Extract if it's a compressed file
+        if filename.endswith('.zip'):
+            with zipfile.ZipFile(download_path, 'r') as zip_ref:
+                zip_ref.extractall(dataset_dir)
+        elif filename.endswith(('.tar', '.tgz', '.gz')):
+            with tarfile.open(download_path, 'r:*') as tar_ref:
+                tar_ref.extractall(dataset_dir)
+
+        # Process the extracted folder
+        extracted_folder = os.path.splitext(filename)[0]
+        self._process_local_folder(os.path.join(dataset_dir, extracted_folder), csv_path, cnn_config)
+
+    def _extract_and_process_compressed_file(self, file_path: str, dataset_dir: str, csv_path: str, cnn_config: Dict):
+        """
+        Extract and process a compressed file.
+        """
+        if file_path.endswith('.zip'):
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                zip_ref.extractall(dataset_dir)
+        elif file_path.endswith(('.tar', '.tgz', '.gz')):
+            with tarfile.open(file_path, 'r:*') as tar_ref:
+                tar_ref.extractall(dataset_dir)
+
+        # Process the extracted folder
+        extracted_folder = os.path.splitext(os.path.basename(file_path))[0]
+        self._process_local_folder(os.path.join(dataset_dir, extracted_folder), csv_path, cnn_config)
+
+    def _load_pytorch_dataset(self, dataset_name: str, dataset_dir: str, csv_path: str, cnn_config: Dict):
+        """
+        Load a PyTorch dataset (e.g., MNIST, CIFAR-100).
+        """
+        if dataset_name.lower() == 'mnist':
+            dataset = datasets.MNIST(root=dataset_dir, download=True)
+        elif dataset_name.lower() == 'cifar100':
+            dataset = datasets.CIFAR100(root=dataset_dir, download=True)
+        else:
+            raise ValueError(f"Unsupported PyTorch dataset: {dataset_name}")
+
+        # Create a CSV file with image paths and labels
+        data = []
+        for idx, (img, label) in enumerate(dataset):
+            img_path = os.path.join(dataset_dir, f'{idx}.png')
+            img.save(img_path)
+            data.append({'image_path': img_path, 'label': label})
+
+        df = pd.DataFrame(data)
+        df.to_csv(csv_path, index=False)
+
+        cnn_config['num_classes'] = len(dataset.classes)
+        cnn_config['class_labels'] = dataset.classes
+
+    def _create_dbnn_conf_file(self, conf_path: str, cnn_config: Dict):
+        """
+        Create a DBNN configuration file.
+        """
+        conf_content = {
+            "file_path": os.path.join('data', cnn_config['dataset_type'], f"{cnn_config['dataset_type']}.csv"),
+            "target_column": "label",
+            "modelType": "Histogram",
+            "training_params": {
+                "epochs": 1000,
+                "learning_rate": 0.001,
+                "batch_size": 128,
+                "enable_adaptive": True
+            }
+        }
+
+        with open(conf_path, 'w') as f:
+            json.dump(conf_content, f, indent=4)
+
+#-------------------------------------------------ImageDBNN-----Ends-----------------------------------------------
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
