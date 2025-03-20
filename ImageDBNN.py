@@ -1372,6 +1372,8 @@ class FeatureExtractor(nn.Module):
         super(FeatureExtractor, self).__init__()
         self.min_image_size = min_image_size
         self.device = device
+        self.cnn = FlexibleCNN(input_channels, output_size, min_image_size).to(device)
+        self.tabular_fc = nn.Linear(output_size, output_size)  # For tabular data
 
         # CNN architecture
         self.cnn = FlexibleCNN(input_channels, output_size, min_image_size).to(device)
@@ -1403,16 +1405,16 @@ class FeatureExtractor(nn.Module):
         return transform(image).to(self.device)
 
     def forward(self, x):
-        """Extract features from input data."""
-        if isinstance(x, str):  # If input is a file path
+        if isinstance(x, str):  # If input is a file path (image)
             image = self.load_image(x)
             x = self.preprocess_image(image)
             x = x.unsqueeze(0)  # Add batch dimension
-
-        if isinstance(x, torch.Tensor) and x.dim() == 4:  # Check if input is image data
             return self.cnn(x)
-        else:
-            raise ValueError("Input must be an image file path or a 4D tensor.")
+        elif isinstance(x, torch.Tensor) and x.dim() == 4:  # If input is image data
+            return self.cnn(x)
+        else:  # If input is tabular data
+            x = x.to(self.device)
+            return self.tabular_fc(x)
 
  class FlexibleCNN(nn.Module):
     def __init__(self, input_channels=1, output_size=128, min_image_size=256):
