@@ -1712,11 +1712,19 @@ class DBNN(GPUDBNN):
 
     def _create_dbnn_conf_file(self, conf_path: str, cnn_config: Dict):
         """
-        Create a DBNN configuration file.
+        Create a DBNN configuration file with dynamically generated column names.
         """
+        # Generate feature column names based on the output size of the CNN
+        feature_cols = [f'Feature{i}' for i in range(cnn_config['output_size'])]
+
+        # Add the target column, image path, and image class
+        column_names = feature_cols + ['target', 'image_path', 'image_class']
+
+        # Create the configuration content
         conf_content = {
             "file_path": os.path.join('data', cnn_config['dataset_type'], f"{cnn_config['dataset_type']}.csv"),
-            "target_column": "label",
+            "column_names": column_names,  # Include all column names
+            "target_column": "target",  # Specify the target column
             "modelType": "Histogram",
             "training_params": {
                 "epochs": 1000,
@@ -1726,8 +1734,11 @@ class DBNN(GPUDBNN):
             }
         }
 
+        # Save the configuration file
         with open(conf_path, 'w') as f:
             json.dump(conf_content, f, indent=4)
+        print(f"Created DBNN configuration file: {conf_path}")
+
 
 
     def train_cnn(self, dataset_name: str, batch_size: int = 32, epochs: int = 10, lr: float = 0.001):
@@ -1844,6 +1855,7 @@ class DBNN(GPUDBNN):
         feature_csv_path = os.path.join(dataset_dir, f'{self.dataset_name}_features.csv')
         feature_df.to_csv(feature_csv_path, index=False)
         print(f"Extracted features saved to {feature_csv_path}")
+
 
     def train_dbnn_on_features(self, dataset_name: str):
         """
