@@ -1470,7 +1470,7 @@ class DBNN(GPUDBNN):
     """Enhanced DBNN class that builds on GPUDBNN implementation"""
 
     def __init__(self, config: Optional[Union[DBNNConfig, dict]] = None,
-                 dataset_name: Optional[str] = None):
+                 dataset_name: Optional[str] = None, is_image_data: bool = False):
 
         """
         Initialize DBNN with configuration
@@ -1538,10 +1538,10 @@ class DBNN(GPUDBNN):
 
         # Initialize Feature Extractor as a "friend"
         self.feature_extractor = FeatureExtractor(
-            input_channels=self.cnn_config['input_channels'],
-            output_size=self.cnn_config['output_size'],
-            min_image_size=self.cnn_config['min_image_size'],
-            device=self.device  # Pass the device from GPUDBNN
+            input_channels=self.cnn_config.get('input_channels', 3),  # Default for RGB images
+            output_size=self.cnn_config.get('output_size', 128),      # Default output feature size
+            min_image_size=self.cnn_config.get('min_image_size', 256),  # Default minimum image size
+            device=self.device
         )
 
         # Update feature dimensions for DBNN
@@ -1862,7 +1862,7 @@ class DBNN(GPUDBNN):
             'test_accuracy': metrics['test_accuracy'],
             'training_time': metrics['training_time']
         }, ignore_index=True)
-#--------------------------------------------------------------Class Ends ------------------------------------
+
     def prepare_batch(self, features):
         """Efficient batch preparation"""
         if not features.is_contiguous():
@@ -2895,6 +2895,146 @@ class DBNN(GPUDBNN):
         return categorical_columns
 
     def _preprocess_data(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
+        """Preprocess data with improved error handling and column consistency.
+        Handles both image and tabular data.
+        """
+        DEBUG.log(f"Starting preprocessing (is_training={is_training})")
+
+        # Check if X is a DataFrame or a tensor
+        if isinstance(X, pd.DataFrame):
+            DEBUG.log(f"Input shape: {X.shape}")
+            DEBUG.log(f"Input columns: {X.columns.tolist()}")
+            DEBUG.log(f"Input dtypes:\n{X.dtypes}")
+        else:
+            DEBUG.log("Input is a tensor, skipping column-specific operations")
+
+        # Make a copy to avoid modifying original data
+        if isinstance(X, pd.DataFrame):
+            X = X.copy()
+        else:
+            X = X.clone().detach()
+
+        # Handle image data
+        if self.is_image_data:
+            DEBUG.log("Processing image data")
+            if isinstance(X, pd.DataFrame):
+                # Assume X contains file paths to images
+                features = []
+                for img_path in X.iloc[:, 0]:  # Assuming the first column contains image paths
+                    features.append(self.feature_extractor(img_path))
+                X_tensor = torch.stack(features).squeeze(1)  # Stack and remove extra dimension
+            else:
+                # Assume X is already a tensor of images
+                X_tensor = self.feature_extractor(X)
+
+            DEBUG.log(f"Image data processed. Output shape: {X_tensor.shape}")
+            return X_tensor
+
+        # Handle tabular data
+        DEBUG.log("Processing tabular data")
+
+        # Step 1: Compute global statistics only once during training
+        if is_training and not self.global_stats_computed:
+            DEBUG.log("Training mode preprocessing - computing global statistics")
+            self.compute_global_statistics(X)  # Compute global stats only once
+            self.global_stats_computed = True  # Mark stats as computed
+        elif is_training:
+            DEBUG.log("Training mode preprocessing - using precomputed global statistics")
+
+        # Step 2: Handle high cardinality columns (only during training)
+        if is_training:
+            self.original_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
+            cardinality_threshold = self._calculate_cardinality_threshold()
+            DEBUG.log(f"Cardinality threshold: {cardinality_threshold}")
+            if isinstance(X, pd.DataFrame):
+                X = self._remove_high_cardinality_columns(X, cardinality_threshold)
+            DEBUG.log(f"Shape after cardinality filtering: {X.shape}")
+
+            # Store the features we'll actually use
+            self.feature_columns = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
+            DEBUG.log(f"Selected feature columns: {self.feature_columns}")
+
+            # Store high cardinality columns for future reference
+            if isinstance(X, pd.DataFrame):
+                self.high_cardinality_columns = list(set(self.original_columns) - set(self.feature_columns))
+                if self.high_cardinality_columns:
+                    DEBUG.log(f"Removed high cardinality columns: {self.high_cardinality_columns}")
+
+        # Step 3: Handle categorical features
+        DEBUG.log("Starting categorical encoding")
+        try:
+            if isinstance(X, pd.DataFrame):
+                X_encoded = self._encode_categorical_features(X, is_training)
+            else:
+                X_encoded = X  # Skip encoding if X is already a tensor
+            DEBUG.log(f"Shape after categorical encoding: {X_encoded.shape}")
+            if isinstance(X_encoded, pd.DataFrame):
+                DEBUG.log(f"Encoded dtypes:\n{X_encoded.dtypes}")
+        except Exception as e:
+            DEBUG.log(f"Error in categorical encoding: {str(e)}")
+            raise
+
+        # Step 4: Convert to numpy and check for issues
+        try:
+            if isinstance(X_encoded, pd.DataFrame):
+                X_numpy = X_encoded.to_numpy()
+            else:
+                X_numpy = X_encoded.cpu().numpy()
+            DEBUG.log(f"Numpy array shape: {X_numpy.shape}")
+            DEBUG.log(f"Any NaN: {np.isnan(X_numpy).any()}")
+            DEBUG.log(f"Any Inf: {np.isinf(X_numpy).any()}")
+        except Exception as e:
+            DEBUG.log(f"Error converting to numpy: {str(e)}")
+            raise
+
+        # Step 5: Scale the features using precomputed global statistics
+        try:
+            X_scaled = np.zeros_like(X_numpy)
+            #batch_size = 1024  # Adjust based on available memory
+
+            for i in range(0, len(X_numpy), batch_size):
+                batch_end = min(i + batch_size, len(X_numpy))
+                batch_X = X_numpy[i:batch_end]
+
+                # Scale the batch using precomputed global statistics
+                X_scaled[i:batch_end] = (batch_X - self.global_mean) / self.global_std
+
+            DEBUG.log("Scaling successful")
+        except Exception as e:
+            DEBUG.log(f"Standard scaling failed: {str(e)}. Using manual scaling")
+            if X_numpy.size == 0:
+                print("\033[K" +"[WARNING] Empty feature array! Returning original data")
+                X_scaled = X_numpy
+            else:
+                means = np.nanmean(X_numpy, axis=0)
+                stds = np.nanstd(X_numpy, axis=0)
+                stds[stds == 0] = 1
+                X_scaled = (X_numpy - means) / stds
+
+        # Step 6: Convert scaled data to a PyTorch tensor
+        X_tensor = torch.tensor(X_scaled, dtype=torch.float32, device=self.device)
+
+        # Step 7: Compute feature pairs and bin edges (only during training)
+        if is_training:
+            remaining_feature_indices = list(range(len(self.feature_columns))) if self.feature_columns else list(range(X_scaled.shape[1]))
+            DEBUG.log(f"Computing feature pairs from {len(remaining_feature_indices)} features")
+
+            # Generate feature pairs using the updated set of features
+            self.feature_pairs = self._generate_feature_combinations(
+                remaining_feature_indices,
+                self.config.get('likelihood_config', {}).get('feature_group_size', 2),
+                self.config.get('likelihood_config', {}).get('max_combinations', None)
+            )
+            DEBUG.log(f"Generated {len(self.feature_pairs)} feature pairs")
+
+            # Compute bin edges using the preprocessed data (now a tensor)
+            self.bin_edges = self._compute_bin_edges(X_tensor, self.config.get('likelihood_config', {}).get('bin_sizes', [128]))
+            DEBUG.log(f"Computed bin edges for {len(self.bin_edges)} feature pairs")
+
+        DEBUG.log(f"Final preprocessed shape: {X_scaled.shape}")
+        return X_tensor
+
+    def _preprocess_data_old(self, X: Union[pd.DataFrame, torch.Tensor], is_training: bool = True) -> torch.Tensor:
         """Preprocess data with improved error handling and column consistency."""
         DEBUG.log(f"Starting preprocessing (is_training={is_training})")
 
