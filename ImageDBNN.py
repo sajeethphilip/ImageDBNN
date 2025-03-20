@@ -29,7 +29,7 @@ import os
 import pickle
 import configparser
 import traceback  # Add to provide debug
-#ImageDBNN 
+#ImageDBNN
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1367,6 +1367,103 @@ class DBNNConfig:
         with open(config_path, 'w') as f:
             json.dump(config_dict, f, indent=2)
 
+class FeatureExtractor(nn.Module):
+    def __init__(self, input_channels=3, output_size=128, min_image_size=256, device=None):
+        super(FeatureExtractor, self).__init__()
+        self.min_image_size = min_image_size
+        self.device = device
+
+        # CNN architecture
+        self.cnn = FlexibleCNN(input_channels, output_size, min_image_size).to(device)
+
+    def load_image(self, image_path):
+        """Load an image from disk, handling various formats."""
+        if image_path.endswith('.fits'):
+            with fits.open(image_path) as hdul:
+                data = hdul[0].data
+            return Image.fromarray(data)
+        elif image_path.endswith('.dcm'):
+            dicom_data = pydicom.dcmread(image_path)
+            return Image.fromarray(dicom_data.pixel_array)
+        else:
+            return Image.open(image_path)
+
+    def preprocess_image(self, image):
+        """Preprocess an image to a minimum size and convert to tensor."""
+        width, height = image.size
+        if width < self.min_image_size or height < self.min_image_size:
+            scale = max(self.min_image_size / width, self.min_image_size / height)
+            new_size = (int(width * scale), int(height * scale))
+            image = image.resize(new_size, Image.BILINEAR)
+
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        return transform(image).to(self.device)
+
+    def forward(self, x):
+        """Extract features from input data."""
+        if isinstance(x, str):  # If input is a file path
+            image = self.load_image(x)
+            x = self.preprocess_image(image)
+            x = x.unsqueeze(0)  # Add batch dimension
+
+        if isinstance(x, torch.Tensor) and x.dim() == 4:  # Check if input is image data
+            return self.cnn(x)
+        else:
+            raise ValueError("Input must be an image file path or a 4D tensor.")
+
+ class FlexibleCNN(nn.Module):
+    def __init__(self, input_channels=1, output_size=128, min_image_size=256):
+        super(FlexibleCNN, self).__init__()
+        self.min_image_size = min_image_size
+
+        # Convolutional layers
+        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1)
+        self.conv5 = nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1)
+        self.conv6 = nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1)
+        self.conv7 = nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1)
+
+        # Adaptive pooling to handle varying input sizes
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((7, 7))  # Output size fixed to 7x7
+
+        # Fully connected layers
+        self.fc1 = nn.Linear(512 * 7 * 7, output_size)
+
+    def forward(self, x):
+        # Ensure input is at least min_image_size x min_image_size
+        if x.size(2) < self.min_image_size or x.size(3) < self.min_image_size:
+            x = F.interpolate(x, size=(self.min_image_size, self.min_image_size), mode='bilinear', align_corners=False)
+
+        # Convolutional layers
+        x = F.relu(self.conv1(x))
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+        x = F.relu(self.conv2(x))
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+        x = F.relu(self.conv3(x))
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+        x = F.relu(self.conv4(x))
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+        x = F.relu(self.conv5(x))
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+        x = F.relu(self.conv6(x))
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+        x = F.relu(self.conv7(x))
+        x = F.max_pool2d(x, kernel_size=2, stride=2)
+
+        # Adaptive pooling
+        x = self.adaptive_pool(x)
+
+        # Flatten and fully connected layer
+        x = x.view(x.size(0), -1)  # Flatten
+        x = F.relu(self.fc1(x))
+
+        return x
+
 class DBNN(GPUDBNN):
     """Enhanced DBNN class that builds on GPUDBNN implementation"""
 
@@ -1433,6 +1530,20 @@ class DBNN(GPUDBNN):
         # Preprocess data once during initialization
         self._is_preprocessed = False  # Flag to track preprocessing
         self._preprocess_and_split_data()  # Call preprocessing only once
+
+        # Load CNN configuration
+        self.cnn_config = self._load_cnn_config(dataset_name)
+
+        # Initialize Feature Extractor as a "friend"
+        self.feature_extractor = FeatureExtractor(
+            input_channels=self.cnn_config['input_channels'],
+            output_size=self.cnn_config['output_size'],
+            min_image_size=self.cnn_config['min_image_size'],
+            device=self.device  # Pass the device from GPUDBNN
+        )
+
+        # Update feature dimensions for DBNN
+        self.feature_dims = self.cnn_config['output_size']
 
     def compute_global_statistics(self, X: pd.DataFrame):
         """Compute global statistics (e.g., mean, std) for normalization."""
