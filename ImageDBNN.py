@@ -1739,90 +1739,98 @@ class DBNN(GPUDBNN):
             json.dump(conf_content, f, indent=4)
         print(f"Created DBNN configuration file: {conf_path}")
 
-
-
     def train_cnn(self, dataset_name: str, batch_size: int = 32, epochs: int = 10, lr: float = 0.001):
-            """
-            Train the CNN on the entire dataset and save extracted features to a CSV file.
+        """
+        Train the CNN on the entire dataset and save extracted features to a CSV file.
+        """
+        # Debug: Print dataset information
+        print(f"Training CNN on dataset: {dataset_name}")
+        print(f"Batch size: {batch_size}, Epochs: {epochs}, Learning rate: {lr}")
 
-            Args:
-                dataset_name: Name of the dataset (local folder, URL, compressed file, or PyTorch dataset).
-                batch_size: Batch size for training.
-                epochs: Number of training epochs.
-                lr: Learning rate for the optimizer.
-            """
-            # Load the dataset
-            self._load_cnn_config(dataset_name)  # This will generate the CSV file if it doesn't exist
-            dataset_dir = os.path.join('data', dataset_name)
-            csv_path = os.path.join(dataset_dir, f'{dataset_name}.csv')
+        # Load the dataset
+        self._load_cnn_config(dataset_name)
+        dataset_dir = os.path.join('data', dataset_name)
+        csv_path = os.path.join(dataset_dir, f'{dataset_name}.csv')
 
-            # Create a custom dataset from the CSV file
-            class ImageDataset(Dataset):
-                def __init__(self, csv_path, transform=None):
-                    self.data = pd.read_csv(csv_path)
-                    self.transform = transform
+        # Debug: Print dataset path
+        print(f"Dataset CSV path: {csv_path}")
 
-                def __len__(self):
-                    return len(self.data)
+        # Create a custom dataset from the CSV file
+        class ImageDataset(Dataset):
+            def __init__(self, csv_path, transform=None):
+                self.data = pd.read_csv(csv_path)
+                self.transform = transform
 
-                def __getitem__(self, idx):
-                    img_path = self.data.iloc[idx]['image_path']
-                    label = self.data.iloc[idx]['label']
-                    img = Image.open(img_path).convert('RGB')
-                    if self.transform:
-                        img = self.transform(img)
-                    return img, label, img_path  # Return image, label, and image path
+            def __len__(self):
+                return len(self.data)
 
-            # Define transformations
-            transform = transforms.Compose([
-                transforms.Resize((self.cnn_config['min_image_size'], self.cnn_config['min_image_size'])),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
+            def __getitem__(self, idx):
+                img_path = self.data.iloc[idx]['image_path']
+                label = self.data.iloc[idx]['label']
+                img = Image.open(img_path).convert('RGB')
+                if self.transform:
+                    img = self.transform(img)
+                return img, label, img_path  # Return image, label, and image path
 
-            # Create the dataset and dataloader
-            dataset = ImageDataset(csv_path, transform=transform)
-            dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        # Define transformations
+        transform = transforms.Compose([
+            transforms.Resize((self.cnn_config['min_image_size'], self.cnn_config['min_image_size'])),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
 
-            # Define the CNN model
-            cnn_model = FlexibleCNN(
-                input_channels=self.cnn_config['input_channels'],
-                output_size=self.cnn_config['output_size'],
-                min_image_size=self.cnn_config['min_image_size']
-            ).to(self.device)
+        # Create the dataset and dataloader
+        dataset = ImageDataset(csv_path, transform=transform)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-            # Define loss function and optimizer
-            criterion = nn.CrossEntropyLoss()
-            optimizer = optim.Adam(cnn_model.parameters(), lr=lr)
+        # Debug: Print dataset size
+        print(f"Dataset size: {len(dataset)} images")
 
-            # Train the CNN with tqdm progress bar
-            cnn_model.train()
-            for epoch in range(epochs):
-                epoch_pbar = tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{epochs}")
-                for batch_idx, (images, labels) in enumerate(dataloader):
-                    images, labels = images.to(self.device), labels.to(self.device)
+        # Define the CNN model
+        cnn_model = FlexibleCNN(
+            input_channels=self.cnn_config['input_channels'],
+            output_size=self.cnn_config['output_size'],
+            min_image_size=self.cnn_config['min_image_size']
+        ).to(self.device)
 
-                    # Forward pass
-                    outputs = cnn_model(images)
-                    loss = criterion(outputs, labels)
+        # Debug: Print model architecture
+        print(f"CNN model architecture:\n{cnn_model}")
 
-                    # Backward pass and optimization
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
+        # Define loss function and optimizer
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(cnn_model.parameters(), lr=lr)
 
-                    epoch_pbar.update(1)
-                    epoch_pbar.set_postfix({'loss': loss.item()})
+        # Train the CNN with tqdm progress bar
+        cnn_model.train()
+        for epoch in range(epochs):
+            epoch_pbar = tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}/{epochs}")
+            for batch_idx, (images, labels, img_paths) in enumerate(dataloader):
+                images, labels = images.to(self.device), labels.to(self.device)
 
-                epoch_pbar.close()
+                # Forward pass
+                outputs = cnn_model(images)
+                loss = criterion(outputs, labels)
 
-            # Save the trained CNN model
-            model_path = os.path.join(dataset_dir, f'{dataset_name}_cnn.pth')
-            torch.save(cnn_model.state_dict(), model_path)
-            print(f"CNN model saved to {model_path}")
+                # Backward pass and optimization
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            # Extract features using the trained CNN
-            self._extract_features(cnn_model, dataset, dataset_dir)
+                epoch_pbar.update(1)
+                epoch_pbar.set_postfix({'loss': loss.item()})
+
+            epoch_pbar.close()
+
+        # Debug: Print training completion
+        print(f"CNN training completed for {epochs} epochs")
+
+        # Save the trained CNN model
+        model_path = os.path.join(dataset_dir, f'{dataset_name}_cnn.pth')
+        torch.save(cnn_model.state_dict(), model_path)
+        print(f"CNN model saved to {model_path}")
+
+        # Extract features using the trained CNN
+        self._extract_features(cnn_model, dataset, dataset_dir)
 
     def _extract_features(self, cnn_model, dataset, dataset_dir):
         """
@@ -1834,6 +1842,9 @@ class DBNN(GPUDBNN):
         image_paths = []
         image_classes = []
 
+        # Debug: Print feature extraction start
+        print("Starting feature extraction...")
+
         # Initialize tqdm progress bar for feature extraction
         with torch.no_grad():
             for images, label, img_path in tqdm(dataset, desc="Extracting features"):
@@ -1844,12 +1855,20 @@ class DBNN(GPUDBNN):
                 image_paths.append(img_path)
                 image_classes.append(os.path.basename(os.path.dirname(img_path)))
 
+        # Debug: Print extracted features
+        print(f"Extracted features for {len(features)} images")
+        print(f"Example feature vector: {features[0]}")
+
         # Create DataFrame with feature columns, target, image path, and image class
         feature_cols = [f'Feature{i}' for i in range(len(features[0]))]
         feature_df = pd.DataFrame(features, columns=feature_cols)
         feature_df['target'] = labels
         feature_df['image_path'] = image_paths
         feature_df['image_class'] = image_classes
+
+        # Debug: Print DataFrame preview
+        print("DataFrame preview:")
+        print(feature_df.head())
 
         # Save features to a CSV file
         feature_csv_path = os.path.join(dataset_dir, f'{self.dataset_name}_features.csv')
