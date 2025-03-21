@@ -270,7 +270,10 @@ class DatasetConfig:
     def create_default_config(dataset_name: str) -> Dict:
         """Create a default configuration file with enhanced defaults"""
         config = DatasetConfig.DEFAULT_CONFIG.copy()
-        config['file_path'] = f"{dataset_name}.csv"
+        config['file_path'] = f"{dataset_name}.csv"  # This is not used for image datasets
+        config['target_column'] = 'label'  # Default target column for image datasets
+        config['modelType'] = "Histogram"  # Default model type
+        config['is_image_data'] = True  # Mark this as an image dataset
 
         # Try to infer column names from CSV if it exists
         if os.path.exists(config['file_path']):
@@ -296,7 +299,7 @@ class DatasetConfig:
             "random_seed": 42,
             "epochs": 1000,
             "test_fraction": 0.2,
-            "n_bins_per_dim": 21,
+            "n_bins_per_dim": 128,
             "enable_adaptive": True,
             "compute_device": "auto",
             "invert_DBNN": True,
@@ -320,13 +323,15 @@ class DatasetConfig:
             "use_previous_model": True
         }
         # Save the configuration
-        config_path = f"data/{dataset_name}/{dataset_name}.conf"
+        config_dir = os.path.join('data', dataset_name)
+        os.makedirs(config_dir, exist_ok=True)  # Ensure the directory exists
+        config_path = os.path.join(config_dir, f"{dataset_name}.conf")
         try:
             with open(config_path, 'w') as f:
                 json.dump(config, f, indent=4)
-            print("\033[K" +f"Created default configuration file: {config_path}")
+            print("\033[K" + f"Created default configuration file: {config_path}")
         except Exception as e:
-            print("\033[K" +f"Warning: Could not save configuration file: {str(e)}")
+            print("\033[K" + f"Warning: Could not save configuration file: {str(e)}")
 
         return config
 
@@ -1619,6 +1624,28 @@ class DBNN(GPUDBNN):
             cnn_config['dataset_type'] = 'pytorch_dataset'
             self._load_pytorch_dataset(dataset_name, dataset_dir, csv_path, cnn_config)
 
+        # Determine input_channels based on the first image in the dataset
+        if cnn_config['dataset_type'] == 'local_folder':
+            # Find the first image in the dataset
+            for root, _, files in os.walk(dataset_name):
+                if files:
+                    first_image_path = os.path.join(root, files[0])
+                    break
+
+            # Load the first image and determine the number of channels
+            try:
+                from PIL import Image
+                img = Image.open(first_image_path)
+                if img.mode == 'L':  # Grayscale
+                    cnn_config['input_channels'] = 1
+                elif img.mode == 'RGB':  # RGB
+                    cnn_config['input_channels'] = 3
+                else:
+                    print(f"\033[KWarning: Unsupported image mode '{img.mode}'. Defaulting to 3 input channels.")
+            except Exception as e:
+                print(f"\033[KWarning: Could not determine input channels: {str(e)}. Defaulting to 3 input channels.")
+
+
         # Save the CNN configuration
         with open(config_path, 'w') as f:
             json.dump(cnn_config, f, indent=4)
@@ -1646,6 +1673,7 @@ class DBNN(GPUDBNN):
 
         df = pd.DataFrame(data)
         df.to_csv(csv_path, index=False)
+
 
     def _download_and_process_url(self, url: str, dataset_dir: str, csv_path: str, cnn_config: Dict):
         """
